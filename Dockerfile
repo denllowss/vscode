@@ -1,4 +1,53 @@
 FROM codercom/code-server:latest
 USER root
-EXPOSE 19132/udp
-CMD ["code-server", "--bind-addr", "0.0.0.0:6080", "--auth", "none", "/root"]
+
+# Install OpenSSH server
+RUN apt-get update && apt-get install -y openssh-server iproute2 && \
+    mkdir -p /var/run/sshd && \
+    rm -rf /var/lib/apt/lists/*
+
+# Buat entrypoint script
+RUN cat > /entrypoint.sh << 'EOF'
+#!/bin/bash
+
+# Generate random password untuk root
+SSH_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+
+# Set password root
+echo "root:${SSH_PASS}" | chpasswd
+
+# Konfigurasi SSH
+sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# Start SSH daemon
+service ssh start
+
+# Ambil IP address
+IP_ADDR=$(hostname -I | awk '{print $1}')
+
+# Tampilkan info di log
+echo "============================================"
+echo "  SERVER INFO"
+echo "============================================"
+echo "  [code-server]"
+echo "  URL  : http://${IP_ADDR}:6080"
+echo "  Auth : none"
+echo ""
+echo "  [SSH]"
+echo "  Host : ${IP_ADDR}"
+echo "  Port : 22"
+echo "  User : root"
+echo "  Pass : ${SSH_PASS}"
+echo "============================================"
+
+# Start code-server
+exec code-server --bind-addr 0.0.0.0:6080 --auth none /root
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 6080 22
+
+CMD ["/entrypoint.sh"]
