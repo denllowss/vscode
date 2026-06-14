@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y openssh-server iproute2 && \
 RUN cat > /entrypoint.sh << 'EOF'
 #!/bin/bash
 
-# Generate random password untuk root
-SSH_PASS=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+# Password default
+SSH_PASS="root"
 
 # Set password root
 echo "root:${SSH_PASS}" | chpasswd
