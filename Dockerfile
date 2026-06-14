@@ -10,16 +10,20 @@ RUN apt-get update && apt-get install -y openssh-server iproute2 && \
 RUN cat > /entrypoint.sh << 'EOF'
 #!/bin/bash
 
-# Password default
+# Password SSH
 SSH_PASS="root"
 
-# Set password root
+# Set password root untuk SSH
 echo "root:${SSH_PASS}" | chpasswd
 
-# Konfigurasi SSH
+# Konfigurasi SSH - wajib pakai password
 sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
 sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# Pastikan SSH tidak bisa login tanpa password (nonaktifkan key-only)
+echo "AuthenticationMethods password" >> /etc/ssh/sshd_config
 
 # Start SSH daemon
 service ssh start
@@ -40,7 +44,7 @@ cat > /root/ssh-info.txt << SSHINFO
   Connect via terminal:
   ssh root@${IP_ADDR}
 
-  code-server URL:
+  code-server URL (no password):
   http://${IP_ADDR}:6080
 ============================================
 Generated at: $(date)
@@ -52,7 +56,7 @@ echo "  SERVER INFO"
 echo "============================================"
 echo "  [code-server]"
 echo "  URL  : http://${IP_ADDR}:6080"
-echo "  Auth : none"
+echo "  Auth : none (no password)"
 echo ""
 echo "  [SSH]"
 echo "  Host : ${IP_ADDR}"
@@ -63,7 +67,7 @@ echo "============================================"
 echo "  ssh-info.txt telah dibuat di /root"
 echo "============================================"
 
-# Start code-server
+# Start code-server tanpa password
 exec code-server --bind-addr 0.0.0.0:6080 --auth none /root
 EOF
 
