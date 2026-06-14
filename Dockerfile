@@ -27,6 +27,25 @@ service ssh start
 # Ambil IP address
 IP_ADDR=$(hostname -I | awk '{print $1}')
 
+# Tulis info SSH ke file txt di /root (workspace code-server)
+cat > /root/ssh-info.txt << SSHINFO
+============================================
+  SSH CONNECTION INFO
+============================================
+  Host     : ${IP_ADDR}
+  Port     : 22
+  Username : root
+  Password : ${SSH_PASS}
+
+  Connect via terminal:
+  ssh root@${IP_ADDR}
+
+  code-server URL:
+  http://${IP_ADDR}:6080
+============================================
+Generated at: $(date)
+SSHINFO
+
 # Tampilkan info di log
 echo "============================================"
 echo "  SERVER INFO"
@@ -40,6 +59,8 @@ echo "  Host : ${IP_ADDR}"
 echo "  Port : 22"
 echo "  User : root"
 echo "  Pass : ${SSH_PASS}"
+echo "============================================"
+echo "  ssh-info.txt telah dibuat di /root"
 echo "============================================"
 
 # Start code-server
