@@ -1,78 +1,56 @@
-FROM codercom/code-server:latest
-USER root
+# ============================================================
+# Nintendo DS Emulator (desmume) via noVNC — Satu File
+# Akses: http://localhost:6080/vnc.html?autoconnect=1
+# ============================================================
+FROM ubuntu:22.04
 
-# Install OpenSSH server
-RUN apt-get update && apt-get install -y openssh-server iproute2 && \
-    mkdir -p /var/run/sshd && \
-    rm -rf /var/lib/apt/lists/*
+ENV DEBIAN_FRONTEND=noninteractive \
+    DISPLAY=:1 \
+    SCREEN_WIDTH=1280 \
+    SCREEN_HEIGHT=800 \
+    SCREEN_DEPTH=24 \
+    VNC_PORT=5900 \
+    NOVNC_PORT=6080
 
-# Buat entrypoint script
-RUN cat > /entrypoint.sh << 'EOF'
-#!/bin/bash
+# Install semua dependencies sekaligus
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    openbox \
+    x11-xserver-utils \
+    desmume \
+    fonts-liberation \
+    dbus-x11 \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
 
-# Password SSH
-SSH_PASS="root"
+# Buat folder ROM & tulis startup script dalam satu RUN
+RUN mkdir -p /roms && \
+    printf '#!/bin/bash\n\
+set -e\n\
+echo "=== Nintendo DS Emulator via noVNC ==="\n\
+echo "=== Buka: http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=1 ==="\n\
+Xvfb ${DISPLAY} -screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH} &\n\
+sleep 1\n\
+DISPLAY=${DISPLAY} openbox-session &\n\
+sleep 1\n\
+x11vnc -display ${DISPLAY} -nopw -listen 0.0.0.0 -rfbport ${VNC_PORT} -forever -shared -noxdamage -quiet &\n\
+sleep 1\n\
+websockify --web /usr/share/novnc --wrap-mode=ignore 0.0.0.0:${NOVNC_PORT} localhost:${VNC_PORT} &\n\
+sleep 1\n\
+ROM=$(find /roms -maxdepth 1 \\( -name "*.nds" -o -name "*.NDS" \\) 2>/dev/null | head -n 1)\n\
+if [ -n "$ROM" ]; then\n\
+    echo "=== Memuat ROM: $ROM ==="\n\
+    DISPLAY=${DISPLAY} desmume "$ROM" &\n\
+else\n\
+    echo "=== Tidak ada ROM di /roms, buka desmume kosong ==="\n\
+    DISPLAY=${DISPLAY} desmume &\n\
+fi\n\
+wait\n' > /start.sh && \
+    chmod +x /start.sh
 
-# Set password root untuk SSH
-echo "root:${SSH_PASS}" | chpasswd
+EXPOSE 6080 5900
 
-# Konfigurasi SSH - wajib pakai password
-sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-
-# Pastikan SSH tidak bisa login tanpa password (nonaktifkan key-only)
-echo "AuthenticationMethods password" >> /etc/ssh/sshd_config
-
-# Start SSH daemon
-service ssh start
-
-# Ambil IP address
-IP_ADDR=$(hostname -I | awk '{print $1}')
-
-# Tulis info SSH ke file txt di /root (workspace code-server)
-cat > /root/ssh-info.txt << SSHINFO
-============================================
-  SSH CONNECTION INFO
-============================================
-  Host     : ${IP_ADDR}
-  Port     : 22
-  Username : root
-  Password : ${SSH_PASS}
-
-  Connect via terminal:
-  ssh root@${IP_ADDR}
-
-  code-server URL (no password):
-  http://${IP_ADDR}:6080
-============================================
-Generated at: $(date)
-SSHINFO
-
-# Tampilkan info di log
-echo "============================================"
-echo "  SERVER INFO"
-echo "============================================"
-echo "  [code-server]"
-echo "  URL  : http://${IP_ADDR}:6080"
-echo "  Auth : none (no password)"
-echo ""
-echo "  [SSH]"
-echo "  Host : ${IP_ADDR}"
-echo "  Port : 22"
-echo "  User : root"
-echo "  Pass : ${SSH_PASS}"
-echo "============================================"
-echo "  ssh-info.txt telah dibuat di /root"
-echo "============================================"
-
-# Start code-server tanpa password
-exec code-server --bind-addr 0.0.0.0:6080 --auth none /root
-EOF
-
-RUN chmod +x /entrypoint.sh
-
-EXPOSE 6080 22
-
-CMD ["/entrypoint.sh"]
+CMD ["/start.sh"]
