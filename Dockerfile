@@ -1,48 +1,245 @@
-# ============================================================
-# Nintendo DS Emulator (desmume) via noVNC — Satu File
-# Akses: http://localhost:6080/vnc.html?autoconnect=1
-# ============================================================
-FROM ubuntu:22.04
+FROM codercom/code-server:latest
+USER root
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    DISPLAY=:1 \
-    SCREEN_WIDTH=1280 \
-    SCREEN_HEIGHT=800 \
-    SCREEN_DEPTH=24 \
-    VNC_PORT=5900 \
-    NOVNC_PORT=6080
-
-# Install semua dependencies
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. INSTALL ALAT PROTEKSI
+#    - e2fsprogs : untuk perintah chattr (immutable flag)
+#    - inotify-tools : opsional, pantau perubahan file sistem secara realtime
+# ══════════════════════════════════════════════════════════════════════════════
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    xvfb \
-    x11vnc \
-    novnc \
-    websockify \
-    openbox \
-    obconf \
-    x11-xserver-utils \
-    x11-utils \
-    xterm \
-    desmume \
-    fonts-liberation \
-    dbus-x11 \
-    procps \
-    feh \
+        e2fsprogs \
+        inotify-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Buat folder ROM, config openbox, dan startup script dalam satu RUN
-RUN mkdir -p /roms /root/.config/openbox && \
-    \
-    # Openbox autostart: set background abu-abu + langsung launch desmume
-    printf '# Set background warna abu-abu (bukan hitam)\nxsetroot -solid "#2d2d2d"\n\n# Jalankan desmume saat openbox start\nROM=$(find /roms -maxdepth 1 \\( -name "*.nds" -o -name "*.NDS" \\) 2>/dev/null | head -n 1)\nif [ -n "$ROM" ]; then\n    desmume "$ROM" &\nelse\n    desmume &\nfi\n' > /root/.config/openbox/autostart && \
-    \
-    # Openbox menu klik kanan
-    printf '<openbox_menu xmlns="http://openbox.org/3.4/menu">\n  <menu id="root-menu" label="Menu">\n    <item label="desmume"><action name="Execute"><command>desmume</command></action></item>\n    <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>\n    <separator/>\n    <item label="Exit"><action name="Exit"/></item>\n  </menu>\n</openbox_menu>\n' > /root/.config/openbox/menu.xml && \
-    \
-    # Startup script utama
-    printf '#!/bin/bash\nset -e\n\necho "=== Nintendo DS Emulator via noVNC ==="\necho "=== Buka: http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=1 ==="\n\n# 1. Jalankan Xvfb dan tunggu sampai benar-benar siap\nXvfb ${DISPLAY} -screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH} -ac +extension GLX +render -noreset &\nXVFB_PID=$!\n\n# Poll sampai Xvfb siap (max 10 detik)\nfor i in $(seq 1 20); do\n    if xdpyinfo -display ${DISPLAY} >/dev/null 2>&1; then\n        echo "[OK] Xvfb siap"\n        break\n    fi\n    sleep 0.5\ndone\n\n# 2. Set background warna (bukan hitam polos)\nxsetroot -display ${DISPLAY} -solid "#2d2d2d"\n\n# 3. Window manager openbox\nDISPLAY=${DISPLAY} openbox-session &\nsleep 2\n\n# 4. x11vnc — tunggu display, retry jika gagal\nfor i in 1 2 3; do\n    x11vnc -display ${DISPLAY} -nopw -listen 0.0.0.0 \\\n        -rfbport ${VNC_PORT} -forever -shared \\\n        -noxdamage -noxfixes -repeat -bg -o /tmp/x11vnc.log \\\n        && break || sleep 1\ndone\necho "[OK] x11vnc started"\n\n# 5. noVNC web proxy\nwebsockify --web /usr/share/novnc --wrap-mode=ignore \\\n    0.0.0.0:${NOVNC_PORT} localhost:${VNC_PORT} &\necho "[OK] noVNC started di port ${NOVNC_PORT}"\n\n# 6. Tunggu openbox + desmume fully loaded\nsleep 3\n\necho "=== Siap! Buka browser: http://localhost:${NOVNC_PORT}/vnc.html?autoconnect=1 ==="\n\nwait\n' > /start.sh && \
-    chmod +x /start.sh
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. SIAPKAN WORKSPACE ROOT YANG AMAN
+#    Hanya /root/project yang boleh ditulis & dihapus.
+# ══════════════════════════════════════════════════════════════════════════════
+RUN mkdir -p /root/project
+WORKDIR /root/project
 
-EXPOSE 6080 5900
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. PROTEKSI DIREKTORI SISTEM DENGAN chattr +i (IMMUTABLE)
+#    Bahkan root tidak bisa menghapus / memindahkan file di dalam direktori
+#    yang sudah diberi flag immutable.
+#
+#    Catatan: chattr +i PADA DIREKTORI itu sendiri mencegah:
+#      - penghapusan isi direktori  (unlink)
+#      - rename/move file di dalamnya
+#      - pembuatan file baru di dalamnya
+#    tapi TIDAK mencegah baca / eksekusi file yang sudah ada (normal).
+#
+#    chattr +i tidak bisa dijalankan saat build (butuh kernel nyata),
+#    jadi kita pakai entrypoint inline untuk menerapkannya saat container
+#    pertama kali start.
+# ══════════════════════════════════════════════════════════════════════════════
 
-CMD ["/start.sh"]
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. TULIS ENTRYPOINT INLINE — TIDAK ADA FILE EKSTERNAL
+#    Script ini:
+#      a) Pasang chattr +i pada direktori sistem kritis
+#      b) Verifikasi binary utama masih utuh (SHA256)
+#      c) Jalankan code-server
+# ══════════════════════════════════════════════════════════════════════════════
+RUN cat > /usr/local/sbin/docker-entrypoint.sh << 'ENTRYPOINT'
+#!/bin/bash
+set -euo pipefail
+
+# ── Warna untuk log ───────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+log()  { echo -e "${GREEN}[GUARD]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN] ${NC} $*"; }
+die()  { echo -e "${RED}[FATAL]${NC} $*"; exit 1; }
+
+log "════════════════════════════════════════"
+log "  Code-Server Security Guard v2.0"
+log "════════════════════════════════════════"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# A. APT HOLD — Cegah penghapusan paket kritis via apt/dpkg
+#    apt-mark hold memblokir: apt remove, apt purge, apt autoremove
+#    terhadap paket yang di-hold. Ini berlapis dengan chattr di bawah.
+# ══════════════════════════════════════════════════════════════════════════════
+log "Mengunci paket APT kritis dengan apt-mark hold..."
+
+APT_CRITICAL_PACKAGES=(
+    # ── Manajer paket itu sendiri ──────────────────────────────────────────
+    apt
+    apt-utils
+    dpkg
+    # ── Library inti apt ──────────────────────────────────────────────────
+    libapt-pkg6.0
+    # ── Pondasi sistem ────────────────────────────────────────────────────
+    base-files
+    base-passwd
+    bash
+    coreutils
+    util-linux
+    login
+    passwd
+    # ── Manajemen file & proses ───────────────────────────────────────────
+    findutils
+    grep
+    sed
+    gawk
+    procps
+    # ── Jaringan & keamanan ───────────────────────────────────────────────
+    libssl3
+    ca-certificates
+    openssl
+    # ── Alat proteksi yang sudah kita install ─────────────────────────────
+    e2fsprogs
+    inotify-tools
+)
+
+HELD=0; FAILED=0
+for pkg in "${APT_CRITICAL_PACKAGES[@]}"; do
+    # Hanya hold jika paket memang terpasang
+    if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+        if apt-mark hold "$pkg" > /dev/null 2>&1; then
+            ((HELD++))
+        else
+            warn "  Gagal hold: $pkg"
+            ((FAILED++))
+        fi
+    fi
+done
+log "  ✅ $HELD paket dikunci (hold), $FAILED gagal"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# B. PROTEKSI FILE APT DENGAN chattr +i
+#    Lindungi binary apt, database dpkg, dan konfigurasi apt secara langsung.
+#    Ini adalah lapisan kedua — bahkan jika seseorang mencoba bypass apt-mark,
+#    file fisiknya tidak bisa dihapus.
+# ══════════════════════════════════════════════════════════════════════════════
+log "Memasang chattr +i pada binary & database APT..."
+
+# Binary apt & dpkg (file spesifik, bukan seluruh direktori dulu)
+APT_BINARIES=(
+    /usr/bin/apt
+    /usr/bin/apt-get
+    /usr/bin/apt-cache
+    /usr/bin/apt-mark
+    /usr/bin/apt-key
+    /usr/bin/apt-config
+    /usr/bin/dpkg
+    /usr/bin/dpkg-query
+    /usr/bin/dpkg-divert
+)
+for bin in "${APT_BINARIES[@]}"; do
+    if [[ -f "$bin" ]]; then
+        chattr +i "$bin" 2>/dev/null \
+            && log "  ✅ Immutable: $bin" \
+            || warn "  ⚠️  Lewati: $bin"
+    fi
+done
+
+# Database dpkg (list paket yang terpasang) — immutable seluruh dir
+log "Memasang chattr +i pada database dpkg..."
+chattr -R +i /var/lib/dpkg/info   2>/dev/null && log "  ✅ Immutable: /var/lib/dpkg/info"   || warn "  ⚠️  /var/lib/dpkg/info"
+chattr    +i /var/lib/dpkg/status 2>/dev/null && log "  ✅ Immutable: /var/lib/dpkg/status" || warn "  ⚠️  /var/lib/dpkg/status"
+chattr    +i /var/lib/dpkg/lock   2>/dev/null || true  # lock file, boleh lewati
+chattr -R +i /var/lib/apt         2>/dev/null && log "  ✅ Immutable: /var/lib/apt"         || warn "  ⚠️  /var/lib/apt"
+
+# Konfigurasi apt (/etc/apt sudah dicakup di bawah oleh proteksi /etc)
+chattr -R +i /etc/apt 2>/dev/null && log "  ✅ Immutable: /etc/apt" || warn "  ⚠️  /etc/apt"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C. PASANG IMMUTABLE FLAG PADA DIREKTORI SISTEM KRITIS
+# ══════════════════════════════════════════════════════════════════════════════
+PROTECTED_DIRS=(
+    /bin /sbin
+    /usr/bin /usr/sbin /usr/lib /usr/share
+    /lib /lib64
+    /etc
+    /boot
+)
+
+log "Memasang proteksi immutable pada direktori sistem..."
+for dir in "${PROTECTED_DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+        chattr -R +i "$dir" 2>/dev/null \
+            && log "  ✅ Protected: $dir" \
+            || warn "  ⚠️  Lewati: $dir"
+    fi
+done
+
+# ══════════════════════════════════════════════════════════════════════════════
+# D. PASTIKAN /root/project TETAP WRITABLE
+# ══════════════════════════════════════════════════════════════════════════════
+log "Memastikan workspace /root/project tetap writable..."
+chattr -R -i /root/project 2>/dev/null || true
+# Juga pastikan /tmp bisa ditulis (dibutuhkan banyak program)
+chattr -R -i /tmp 2>/dev/null || true
+log "  ✅ Workspace bebas ditulis: /root/project"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# E. VERIFIKASI BINARY KRITIS MASIH ADA
+# ══════════════════════════════════════════════════════════════════════════════
+log "Memeriksa integritas binary sistem..."
+CRITICAL_BINS=(
+    "/bin/bash"
+    "/usr/bin/env"
+    "/usr/bin/apt"
+    "/usr/bin/apt-get"
+    "/usr/bin/dpkg"
+    "/usr/local/bin/code-server"
+)
+for bin in "${CRITICAL_BINS[@]}"; do
+    [[ -f "$bin" ]] || die "Binary hilang: $bin — sistem mungkin rusak!"
+done
+log "  ✅ Semua binary kritis terverifikasi"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# F. CHECKSUM SHA256 — deteksi modifikasi binary saat runtime
+# ══════════════════════════════════════════════════════════════════════════════
+CHECKSUM_FILE="/tmp/.guard_checksums"
+if [[ ! -f "$CHECKSUM_FILE" ]]; then
+    log "Membuat baseline checksum sistem..."
+    sha256sum "${CRITICAL_BINS[@]}" > "$CHECKSUM_FILE" 2>/dev/null || true
+    chmod 400 "$CHECKSUM_FILE"
+    log "  ✅ Baseline checksum tersimpan"
+else
+    log "Memverifikasi checksum sistem..."
+    if sha256sum -c "$CHECKSUM_FILE" --quiet 2>/dev/null; then
+        log "  ✅ Checksum valid — tidak ada binary yang dimodifikasi"
+    else
+        die "Checksum TIDAK COCOK! Binary sistem telah diubah. Hentikan."
+    fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# G. JALANKAN CODE-SERVER
+# ══════════════════════════════════════════════════════════════════════════════
+log "════════════════════════════════════════"
+log "  Menjalankan code-server di port 6080"
+log "  Workspace: /root/project"
+log "════════════════════════════════════════"
+exec code-server \
+    --bind-addr 0.0.0.0:6080 \
+    --auth none \
+    --disable-telemetry \
+    --disable-update-check \
+    /root/project
+ENTRYPOINT
+
+# Pastikan entrypoint bisa dieksekusi
+RUN chmod 700 /usr/local/sbin/docker-entrypoint.sh
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. KONFIGURASI TAMBAHAN: batasi shell history agar tidak menyimpan perintah
+#    yang berpotensi berbahaya ke disk di luar workspace
+# ══════════════════════════════════════════════════════════════════════════════
+RUN echo 'export HISTFILE=/root/project/.bash_history' >> /root/.bashrc \
+    && echo 'export HISTSIZE=1000'                     >> /root/.bashrc \
+    && echo 'export HISTCONTROL=ignoredups:erasedups'  >> /root/.bashrc
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. EXPOSE & CMD
+# ══════════════════════════════════════════════════════════════════════════════
+EXPOSE 6080
+
+# Tetap root, tapi dijaga oleh entrypoint
+USER root
+
+CMD ["/usr/local/sbin/docker-entrypoint.sh"]
