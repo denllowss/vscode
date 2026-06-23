@@ -32,10 +32,9 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Install noVNC dari git (versi terbaru, path pasti) ──────────
+# ── Install noVNC dari git (path pasti), websockify dari pip ────
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc \
-    && git clone --depth 1 https://github.com/novnc/websockify.git /opt/websockify \
-    && pip3 install --break-system-packages /opt/websockify \
+    && pip3 install websockify \
     && ln -sf /opt/novnc/vnc.html /opt/novnc/index.html
 
 # ── Buat direktori data persistent ──────────────────────────────
