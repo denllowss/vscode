@@ -1,0 +1,66 @@
+version: '3.9'
+
+services:
+  code-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: code-server-ultra:latest
+    container_name: code-server
+    hostname: codeserver
+    restart: unless-stopped
+    
+    ports:
+      - "6080:6080"
+    
+    volumes:
+      - ./workspace:/root/workspace:cached
+      - code-data:/root/.local/share/code-server:delegated
+    
+    environment:
+      - TZ=Asia/Jakarta
+      - DOCKER_USER=root
+    
+    networks:
+      - code-net
+    
+    # Resource optimization
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Performance tweaks
+    shm_size: '2gb'
+    stdin_open: true
+    tty: true
+    
+    # Security opts (minimal untuk performa)
+    security_opt:
+      - no-new-privileges:true
+    
+    # Logging optimization
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  code-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/.code-server-data
+
+networks:
+  code-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
