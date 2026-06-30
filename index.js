@@ -1,186 +1,102 @@
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const { spawn, execSync } = require('child_process');
 
 const PORT = 8080;
-const CUSTOM_PASSWORD = 'denji#123';
+const MAX_RETRIES = 5;
+let retryCount = 0;
+let tunnelProcess = null;
 
-console.log('='.repeat(60));
-console.log('🚀 VSCode Server dengan Cloudflare Tunnel');
-console.log('='.repeat(60));
-console.log();
+console.log('🚀 Memulai VSCode Server dengan Cloudflare Tunnel...\n');
 
-// Fungsi untuk set password custom
-function setCustomPassword() {
-  const configDir = path.join(os.homedir(), '.config', 'code-server');
-  const configPath = path.join(configDir, 'config.yaml');
-  
-  // Buat direktori jika belum ada
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
+function checkConnectivity() {
+  try {
+    execSync('curl -s -m 5 -o /dev/null -w "%{http_code}" https://api.trycloudflare.com', { stdio: 'pipe' });
+    return true;
+  } catch (e) {
+    return false;
   }
-  
-  // Buat config dengan password custom
-  const config = `bind-addr: 127.0.0.1:${PORT}
-auth: password
-password: ${CUSTOM_PASSWORD}
-cert: false
-`;
-  
-  fs.writeFileSync(configPath, config);
-  console.log('✅ Password custom telah di-set!');
 }
 
-// Set password sebelum start
-setCustomPassword();
-
-// Jalankan code-server
-console.log('📦 Memulai Code-Server...');
 const codeServer = spawn('code-server', [
   '--bind-addr', `127.0.0.1:${PORT}`,
-  '--auth', 'password',
-  '--disable-telemetry',
-  '--disable-update-check'
-], {
-  stdio: 'pipe',
-  shell: true
-});
+  '--auth', 'none',
+  '--disable-telemetry'
+], { stdio: 'pipe', shell: true });
 
-let serverReady = false;
+codeServer.stdout.on('data', (data) => console.log(data.toString()));
+codeServer.stderr.on('data', (data) => console.log(data.toString()));
 
-codeServer.stdout.on('data', (data) => {
-  const output = data.toString();
-  
-  // Deteksi server sudah siap
-  if (output.includes('HTTP server listening') && !serverReady) {
-    serverReady = true;
-    console.log('✅ Code-Server siap di port', PORT);
-    console.log('🔑 Password:', CUSTOM_PASSWORD);
-    console.log();
-  }
-  
-  // Tampilkan error jika ada
-  if (output.includes('error') || output.includes('Error')) {
-    console.log('❌', output);
-  }
-});
-
-codeServer.stderr.on('data', (data) => {
-  const output = data.toString();
-  // Filter log yang tidak penting
-  if (!output.includes('Using user-data-dir') && 
-      !output.includes('Using config file')) {
-    console.log('⚠️', output);
-  }
-});
-
-codeServer.on('error', (error) => {
-  console.error('❌ Error menjalankan code-server:', error.message);
-  console.log('\n💡 Pastikan code-server sudah terinstall!');
-  console.log('Install dengan: curl -fsSL https://code-server.dev/install.sh | sh');
-  process.exit(1);
-});
-
-// Tunggu server siap, lalu jalankan cloudflared
 setTimeout(() => {
-  console.log('🌐 Membuat Cloudflare Tunnel...');
-  console.log('⏳ Mohon tunggu...\n');
-  
-  const tunnel = spawn('cloudflared', [
+  startTunnel();
+}, 3000);
+
+function startTunnel() {
+  console.log(`\n🌐 Membuat Cloudflare Tunnel... (percobaan ${retryCount + 1}/${MAX_RETRIES})\n`);
+
+  if (!checkConnectivity()) {
+    console.log('⚠️  Tidak bisa menjangkau api.trycloudflare.com. Cek koneksi/DNS/firewall.');
+  }
+
+  tunnelProcess = spawn('cloudflared', [
     'tunnel',
     '--url', `http://localhost:${PORT}`,
-    '--no-autoupdate'
-  ], {
-    stdio: 'pipe',
-    shell: true
-  });
+    '--retries', '10',
+    '--protocol', 'http2'   // http2 sering lebih stabil daripada quic di jaringan terbatas
+  ], { stdio: 'pipe', shell: true });
 
-  let tunnelUrl = null;
+  let urlFound = false;
 
-  tunnel.stdout.on('data', (data) => {
+  tunnelProcess.stdout.on('data', (data) => {
     const output = data.toString();
-    
-    // Cari URL tunnel
+    console.log(output);
     const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    if (match && !tunnelUrl) {
-      tunnelUrl = match[0];
-      
-      console.log('\n' + '='.repeat(60));
-      console.log('✅ VSCode Server SIAP DIGUNAKAN!');
-      console.log('='.repeat(60));
-      console.log('🌍 URL Publik  :', tunnelUrl);
-      console.log('🔑 Password    :', CUSTOM_PASSWORD);
-      console.log('👤 Username    : (tidak perlu, langsung password saja)');
-      console.log('📁 Working Dir :', process.cwd());
-      console.log('='.repeat(60));
-      console.log('\n💡 Tips:');
-      console.log('   - Buka URL di browser');
-      console.log('   - Masukkan password: denji#123');
-      console.log('   - Link AKTIF selama program berjalan');
-      console.log('   - Tekan CTRL+C untuk menghentikan\n');
-    }
-    
-    // Tampilkan log penting
-    if (output.includes('error') || output.includes('failed')) {
-      console.log('❌', output);
+    if (match) {
+      urlFound = true;
+      console.log('\n✅ VSCode Server siap!');
+      console.log('🌍 URL Publik:', match[0]);
+      console.log('📌 Link ini AKTIF selama server berjalan\n');
     }
   });
 
-  tunnel.stderr.on('data', (data) => {
+  tunnelProcess.stderr.on('data', (data) => {
     const output = data.toString();
-    
-    // Filter log cloudflared yang tidak penting
-    if (!output.includes('INFO') && 
-        !output.includes('Registered tunnel') &&
-        !output.includes('Connection registered') &&
-        !output.includes('Metrics server')) {
-      console.log(output);
+    console.log(output);
+    const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+    if (match) {
+      urlFound = true;
+      console.log('\n✅ VSCode Server siap!');
+      console.log('🌍 URL Publik:', match[0]);
     }
   });
 
-  tunnel.on('error', (error) => {
-    console.error('\n❌ Error menjalankan cloudflared:', error.message);
+  tunnelProcess.on('error', (error) => {
+    console.error('❌ Error tunnel:', error.message);
     console.log('\n💡 Install cloudflared:');
-    console.log('\nUbuntu/Debian:');
-    console.log('  wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb');
-    console.log('  sudo dpkg -i cloudflared-linux-amd64.deb');
-    console.log('\nCentOS/RHEL:');
-    console.log('  wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.rpm');
-    console.log('  sudo rpm -i cloudflared-linux-amd64.rpm');
-    console.log('\nWindows:');
-    console.log('  winget install Cloudflare.cloudflared');
-    console.log('\nMacOS:');
-    console.log('  brew install cloudflared\n');
-    
-    codeServer.kill();
-    process.exit(1);
+    console.log('Ubuntu/Debian: wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && sudo dpkg -i cloudflared-linux-amd64.deb');
+    console.log('Windows: winget install Cloudflare.cloudflared');
   });
 
-  tunnel.on('close', (code) => {
-    console.log('\n⚠️  Cloudflare Tunnel ditutup dengan kode:', code);
-    codeServer.kill();
-    process.exit(code);
+  tunnelProcess.on('exit', (code) => {
+    if (!urlFound && code !== 0) {
+      retryCount++;
+      console.log(`\n⚠️  Cloudflare Tunnel ditutup dengan kode: ${code}`);
+      if (retryCount < MAX_RETRIES) {
+        const delay = Math.min(2000 * retryCount, 10000);
+        console.log(`🔁 Mencoba lagi dalam ${delay / 1000} detik...\n`);
+        setTimeout(startTunnel, delay);
+      } else {
+        console.log('\n❌ Gagal membuat tunnel setelah beberapa percobaan.');
+        console.log('Kemungkinan penyebab:');
+        console.log('  1. Outbound HTTPS ke api.trycloudflare.com diblokir firewall/jaringan container');
+        console.log('  2. DNS tidak bisa resolve trycloudflare.com (coba: nslookup api.trycloudflare.com)');
+        console.log('  3. Coba alternatif tunnel: localtunnel (npx localtunnel --port 8080) atau ngrok');
+      }
+    }
   });
+}
 
-}, 5000);
-
-// Handle termination
 process.on('SIGINT', () => {
-  console.log('\n\n⏹️  Menghentikan server...');
-  console.log('👋 Terima kasih!\n');
+  console.log('\n⏹️  Menghentikan server...');
+  if (tunnelProcess) tunnelProcess.kill();
   codeServer.kill();
-  process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-  codeServer.kill();
-  process.exit(0);
-});
-
-// Handle error yang tidak tertangkap
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error.message);
-  codeServer.kill();
-  process.exit(1);
+  process.exit();
 });
